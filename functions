@@ -1,0 +1,319 @@
+class Sb_Rest_Api(sb_rest_api):
+
+    # SEND DATA OF CURRENT USER'S COURSES TOKEN
+    @http.route(['/ocmapi/my_orders_token'], type = 'json', auth = 'public', csrf = False, website = True, cors='*')
+    def rest_api_user_order_token(self, **kwargs):
+        modeldata = {}
+        if kwargs.get('sbtoken'):
+            sblogin = request.env['res.users'].sudo().search([
+                ('ocmapi_token','=',kwargs['sbtoken'])],limit=1)
+            if sblogin:
+                lang = sblogin.lang or 'en_US'
+                currency_code = sblogin.currency_code or 'SGD'
+                if currency_code == "CNY":
+                    from_currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                    currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'CNY')])
+                else:
+                    currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                    from_currency_id = currency_id
+                limit = 100 #kwargs.get('limit',5)
+                offset = kwargs.get('offset',1)
+                offset = offset * limit - limit
+                next_off = offset + limit
+                fields = kwargs.get('fields', [])
+                result = {'nextoffset': '', 'data': []}
+                order_name = kwargs.get('order_name', [])
+                session_obj = request.env['sb.course.session']
+                user = sblogin and sblogin[0] or False
+                partner = request.env['res.partner'].sudo().search([
+                    ('id', '=', user.partner_id.id)
+                ])
+                if partner.parent_id:
+                    domain_order = [
+                        '|', '|', 
+                        ('partner_id','child_of',partner.id),
+                        ('partner_id','in',[ x.partner_id.id for x in user.child_ids]),
+                        ('partner_id','=', partner.parent_id.id),
+                        ('state', 'in', ['sale','wfp']),
+                    ]
+                else:
+                    domain_order = [
+                        '|',
+                        ('partner_id','child_of',partner.id),
+                        ('partner_id','in',[ x.partner_id.id for x in user.child_ids]),
+                        ('state', 'in', ['sale','wfp']),
+                    ]
+                if order_name:
+                    order_name = [name.upper() for name in order_name]
+                    domain_order.append(('name', 'in', order_name))
+                order_ids = request.env['sale.order'].sudo().with_context(lang=lang).search(
+                    domain_order, limit = limit, offset = offset
+                )
+                next_rec_id = request.env['sale.order'].sudo().with_context(lang=lang).search(
+                    domain_order, limit = 1, offset = next_off
+                )
+                if order_ids:
+                    for order in order_ids:
+                        course_ids = []
+                        line_course_ids = []
+                        coupon_id = False
+                        for line in order.order_line:
+                            line_course_ids.append(line.course_schedule_id.course_id.id)
+                            if line.is_coupon_line:
+                                coupon_ids = request.env['sale.order.coupon'].sudo().search(
+                                    [('name', '=', line.name)]
+                                )
+                                if coupon_ids:
+                                    coupon_id = coupon_ids[0]
+                                    course_ids = [c.id for c in coupon_id.course_ids]
+                        if order.currency_id.name == 'SGD' and currency_code == 'CNY':
+                            from_currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                            currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'CNY')])
+                        else:
+                            currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                            from_currency_id = currency_id
+                        full_session = False
+                        order_dict = eval(ORDER_DETAILS)
+                        order_line_mx_total = False
+                        order_line_mx_ids = []
+                        if course_ids:
+                            order_line_mx_total = order.order_line.filtered(lambda x: x.course_schedule_id.course_id.id in course_ids)
+                            oline_amount = 0
+                            oline_id = False
+                            for oline in order_line_mx_total:
+                                if oline_amount < oline.price_subtotal:
+                                    oline_amount = oline.price_subtotal
+                                    oline_id = oline
+                            if oline_id:
+                                order_line_mx_total = oline_id
+                        for order_line_dict in order_dict.get('order_line', []):
+                            order_line_id = request.env['sale.order.line'].sudo().with_context(lang=lang).search(
+                                [('id', '=', int(order_line_dict['id']))]
+                            )
+                            refund_fields = ["order_id", "customer_id", "state", "cancel_reason", "customer_resaon", "date_time", "state", "customer_resaon", "resaon_id"]
+                            refund_datas = request.env['order.refund.request'].sudo().search([
+                                ('order_line_id', '=', order_line_id.id)
+                            ], limit=1).read(refund_fields)
+                            price_subtotal = order_line_dict.get('price_subtotal', 0.0)
+                            if coupon_id:
+                                if course_ids:
+                                    if order_line_id.course_schedule_id:
+                                        if order_line_id.course_schedule_id.course_id:
+                                            if order_line_id.course_schedule_id.course_id.id in course_ids:
+                                                if coupon_id.coupon_type == 'fixed':
+                                                    if order_line_mx_total and order_line_mx_total[0].id == order_line_id.id:
+                                                        coupon_price = coupon_id.price
+                                                        if price_subtotal < coupon_price:
+                                                            price_subtotal = 0.0
+                                                        else:
+                                                            price_subtotal = price_subtotal - coupon_price
+                                                else:
+                                                    total_price_subtotal = price_subtotal * coupon_id.percentage / 100
+                                                    if price_subtotal < total_price_subtotal:
+                                                        price_subtotal = 0.0
+                                                    else:
+                                                        price_subtotal = price_subtotal - total_price_subtotal
+                                else:
+                                    total_price_subtotal = price_subtotal * coupon_id.percentage / 100
+                                    if price_subtotal < total_price_subtotal:
+                                        price_subtotal = 0.0
+                                    else:
+                                        price_subtotal = price_subtotal - total_price_subtotal
+
+                            order_line_dict.update({
+                                'discount': order_line_dict.get('discount', 0.0),
+                                'actual_price': from_currency_id.compute(order_line_dict.get('actual_price', 0.0), currency_id),
+                                'offer_price': from_currency_id.compute(order_line_dict.get('offer_price', 0.0), currency_id),
+                                'price_subtotal': from_currency_id.compute(price_subtotal, currency_id),
+                                'price_unit': from_currency_id.compute(order_line_dict.get('price_unit', 0.0), currency_id),
+                                'licensee_rate': from_currency_id.compute(order_line_dict.get('licensee_rate', 0.0), currency_id),
+                                'licensee_surcharge': from_currency_id.compute(order_line_dict.get('licensee_surcharge', 0.0), currency_id),
+                                'price_subtotal_wo_ls': from_currency_id.compute(order_line_dict.get('price_subtotal_wo_ls', 0.0) - order_line_dict.get('licensee_surcharge', 0.0), currency_id),
+                                'currency_name': currency_id and currency_id.name or "SGD",
+                                'currency_symbol': currency_id and currency_id.symbol or "$",
+                                'refund_datas': refund_datas and refund_datas or False,
+                                'full_session': order_line_id.full_session,
+                                'is_trial_session': order_line_id.is_trial_session,
+                                'is_past_session': order_line_id.is_past_session,
+                            })
+                            if order_line_id.full_session:
+                                if order.state == 'sale':
+                                    order_line_dict.update({
+                                        "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                        "purchased_session": len(order_line_id.course_schedule_id.session_ids),
+                                    })
+                                else:
+                                    order_line_dict.update({
+                                        "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                        "purchased_session": len(order_line_id.course_schedule_id.session_ids),
+                                    })
+                            elif order_line_id.is_trial_session:
+                                order_line_dict.update({
+                                    "total_session": 1,
+                                    "purchased_session": 1,
+                                })
+                            elif order_line_id.is_past_session:
+                                if order_line_id.past_order_id and order_line_id.past_order_id.state == 'sale':
+                                    if order.state == 'sale':
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.course_schedule_id.session_ids),
+                                        })
+                                    else:
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.course_schedule_id.session_ids) - len(order_line_id.past_session_ids),
+                                        })
+                                else:
+                                    if order.state == 'sale':
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.past_session_ids),
+                                        })
+                                    else:
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.past_session_ids),
+                                        })
+                            else:
+                                if order.state == 'sale':
+                                    try:
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.course_schedule_id.session_ids.filtered(lambda x: x.expire_time >= order_line_id.course_session_id.date_time)),
+                                        })
+                                    except:
+                                        order_line_dict.update({
+                                            "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                            "purchased_session": len(order_line_id.course_schedule_id.session_ids),
+                                        })
+                                else:
+                                    order_line_dict.update({
+                                        "total_session": len(order_line_id.course_schedule_id.session_ids),
+                                        "purchased_session": len(order_line_id.course_schedule_id.session_ids.filtered(lambda x: x.expire_time >= order_line_id.course_session_id.date_time)),
+                                    })
+                        res = order_dict
+                        coupon_price = 0.0
+                        order_price_wo_coupon = 0.0
+                        count = 0
+                        session_ids = []
+                        for line in order.order_line:
+                            full_session = False
+                            if line.is_coupon_line:
+                                coupon_price += abs(line.price_subtotal)
+                            else:
+                                if line.full_session:
+                                    full_session = True
+                                count += 1
+                                order_price_wo_coupon += abs(line.price_subtotal)
+                        payment_fields = ["reference", "amount", "fees", "acquirer_id", "acquirer_reference", "date_validate", "state_message"]
+                        payment_datas = request.env['payment.transaction'].sudo().search([
+                            ('sale_order_id', '=', order.id), ('state', '=', 'done')
+                        ], limit=1).read(payment_fields)
+                        cash_string = order_price_wo_coupon <= 0.0 and 'N/A' or (res.get('amount_total', 0.0) <= 0.0 and 'N/A' or 'cash')
+                        payment_state_string = order_price_wo_coupon <= 0.0 and 'N/A' or (res.get('amount_total', 0.0) <= 0.0 and 'N/A' or 'unpaid')
+                        res.update({
+                            'amount_total': res.get('amount_total', 0.0),
+                            'amount_tax': res.get('amount_tax', 0.0),
+                            'amount_untaxed': res.get('amount_untaxed', 0.0),
+                            'coupon_price': coupon_price,
+                            'order_price_wo_coupon': order_price_wo_coupon,
+                            'currency_name': currency_id and currency_id.name or "SGD",
+                            'currency_symbol': currency_id and currency_id.symbol or "$",
+                            'total_line': count,
+                            'payment_datas': payment_datas and payment_datas or cash_string,
+                            'payment_state': payment_datas and 'paid' or payment_state_string,
+                            "full_session": full_session,
+                            'session_datas': 0,
+                        })
+                        result['data'].append(res)
+                    if next_rec_id:
+                        result['nextoffset'] = next_off
+                    else:
+                        result['nextoffset'] = 'False'
+                    return result
+                else:
+                    return {'message': _('No order found.!')}
+            else:
+                _logger.info('Invalid Token %s', kwargs.get('sbtoken', False))
+                return {'message': _('Invalid Token')}
+        else:
+            _logger.info("Your session has expired. Please login again.")
+            return {'message': _('Your session has expired. Please login again.')}
+
+@http.route(['/ocmapi/get-cart-api/',], type='json', auth='public', csrf=False, website=True, cors='*')
+    def rest_api_get_cart_api(self, **kwargs):
+        if kwargs.get('sbtoken', False):
+            sblogin = request.env['res.users'].sudo().search([('ocmapi_token','=',kwargs['sbtoken'])],limit=1).id
+            if sblogin:
+                sb_login_user = request.env['res.users'].sudo().search([('ocmapi_token','=',kwargs['sbtoken'])],limit=1)
+                lang = sb_login_user and sb_login_user.lang or 'en_US'
+                currency_code = sb_login_user.currency_code or 'SGD'
+                if currency_code == "CNY":
+                    from_currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                    currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'CNY')])
+                    price_list = request.env['product.pricelist'].sudo().search([('currency_id.name', '=ilike', 'CNY')], limit=1)
+                else:
+                    price_list = request.env['product.pricelist'].sudo().search([('currency_id.name', '=ilike', 'SGD')], limit=1)
+                    currency_id = request.env['res.currency'].sudo().with_context(lang=lang).search([('name', 'ilike', 'SGD')])
+                    from_currency_id = currency_id
+
+                user = request.env['res.users'].sudo().search([('id','=',sblogin)])
+                order_obj = request.env['sale.order']
+                order = order_obj.sudo().with_context(lang=lang).search([('partner_id', '=', user.partner_id.id),('state','=','draft')], limit=1)
+                if order:
+                    is_session_going = False
+                    result = eval(ORDER_DETAILS)
+                    coupon_price = 0.0
+                    order_price_wo_coupon = 0.0
+                    count = 0 
+                    order.sudo().write({'pricelist_id': price_list.id})
+                    order.sudo()._onchange_pricelist_id()
+                    for line in order.order_line:
+                        if line.is_coupon_line:
+                            coupon_price += abs(line.price_subtotal)
+                        else:
+                            count += 1
+                            order_price_wo_coupon += abs(line.price_subtotal)
+                    for order_line_dict in result.get('order_line', []):
+                        line = request.env['sale.order.line'].sudo().with_context(lang=lang).search([('id','=',int(order_line_dict['id']))], limit=1)
+                        date_time = datetime.now()
+                        if line.course_id and line.course_id.course_type != '1on1' and line.course_session_id and not line.is_past_session:
+                            session_datetime = datetime.strptime(line.course_session_id.expire_time, "%Y-%m-%d %H:%M:%S")
+                            if session_datetime <= date_time:
+                                order_line_dict.update({
+                                    'is_session_going': True
+                                })
+                                is_session_going = True
+                            else:
+                                order_line_dict.update({
+                                    'is_session_going': False
+                                })
+                        order_line_dict.update({
+                            'discount': order_line_dict.get('discount', 0.0),
+                            'actual_price': order_line_dict.get('actual_price', 0.0),
+                            'offer_price': order_line_dict.get('offer_price', 0.0),
+                            'licensee_rate': order_line_dict.get('licensee_rate', 0.0),
+                            'licensee_surcharge': order_line_dict.get('licensee_surcharge', 0.0),
+                            'price_subtotal_wo_ls': order_line_dict.get('price_subtotal_wo_ls', 0.0) - order_line_dict.get('licensee_surcharge', 0.0),
+                            'currency_name': currency_id and currency_id.name or "SGD",
+                            'currency_symbol': currency_id and currency_id.symbol or "$",
+                        })
+                    result.update({
+                        'amount_total': result.get('amount_total', 0.0),
+                        'amount_tax': result.get('amount_tax', 0.0),
+                        'amount_untaxed': result.get('amount_untaxed', 0.0),
+                        'coupon_price': coupon_price,
+                        'order_price_wo_coupon': round(order_price_wo_coupon, 2),
+                        'currency_name': currency_id and currency_id.name or "SGD",
+                        'currency_symbol': currency_id and currency_id.symbol or "$",
+                        'total_line': count,
+                        'is_session_going': is_session_going,
+                    })
+                    return result
+                _logger.info("order not found.")
+                return {'message': _('order not found.')}
+            _logger.info("login unsuccessful.")
+            return {'message': _('login unsuccessful.')}
+        _logger.info("token is missing.")
+        return {'message': _('token is missing.')}
